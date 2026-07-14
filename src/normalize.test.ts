@@ -31,10 +31,16 @@ describe('normalize', () => {
     expect(normalize(long).length).toBe(80);
   });
 
-  it('handles unicode letters (ä, ö, ü, ß, §)', () => {
-    expect(normalize('Prüfung')).toBe('prüfung');
-    expect(normalize('§42')).toBe('§42');
-    expect(normalize('Größe')).toBe('größe');
+  it('keeps letters from any language (Unicode-aware)', () => {
+    expect(normalize('café')).toBe('café');
+    expect(normalize('naïve')).toBe('naïve');
+    expect(normalize('日本語')).toBe('日本語');
+  });
+
+  it('replaces punctuation and symbols with underscores', () => {
+    expect(normalize('C++')).toBe('c'); // trailing symbols trimmed
+    expect(normalize('a/b/c')).toBe('a_b_c');
+    expect(normalize('50%')).toBe('50'); // trailing underscore trimmed
   });
 
   it('returns empty string for empty input', () => {
