@@ -1,0 +1,15 @@
+node_modules/
+dist/
+coverage/
+.nyc_output/
+.vite/
+*.tsbuildinfo
+*.log
+npm-debug.log*
+.DS_Store
+.idea/
+.vscode/
+*.swp
+.env
+.env.*
+!.env.example

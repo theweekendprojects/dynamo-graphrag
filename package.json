@@ -1,0 +1,44 @@
+{
+  "name": "dynamo-graphrag",
+  "version": "0.1.0",
+  "description": "Serverless GraphRAG on DynamoDB — knowledge graph extraction, storage, and multi-hop traversal with zero infrastructure cost at rest.",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run --config vitest.config.ts",
+    "test:watch": "vitest --config vitest.config.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "graphrag",
+    "knowledge-graph",
+    "rag",
+    "dynamodb",
+    "serverless",
+    "entity-extraction",
+    "graph-traversal",
+    "multi-hop",
+    "adjacency-list"
+  ],
+  "dependencies": {
+    "@aws-sdk/lib-dynamodb": "^3.600.0",
+    "@aws-sdk/client-dynamodb": "^3.600.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vitest": "^2.0.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
