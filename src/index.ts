@@ -6,15 +6,15 @@ export type {
   ExtractorFn,
   GraphNode,
   GraphEdge,
-  LookupResult,
-  TraversalResult,
+  EntityResult,
+  WalkResult,
 } from './types.js';
 
 // Graph store (DynamoDB adjacency list)
-export { GraphStore, type GraphStoreOptions, type WriteResult } from './graph-store.js';
+export { GraphStore, type GraphStoreOptions, type WriteStats } from './graph-store.js';
 
 // Graph builder (extraction orchestrator)
-export { GraphBuilder, type GraphBuilderOptions, type ChunkInput, type ProcessResult } from './graph-builder.js';
+export { GraphBuilder, type GraphBuilderOptions, type SegmentInput, type SegmentResult } from './graph-builder.js';
 
 // Utility
-export { normalize } from './normalize.js';
+export { slugify } from './slugify.js';

@@ -16,7 +16,7 @@ export interface Entity {
 export interface Relationship {
   /** Source entity name */
   source: string;
-  /** Verb phrase describing the relationship (e.g. "requires", "triggers", "defined_by") */
+  /** Verb phrase describing the relationship (e.g. "requires", "triggers", "uses") */
   relation: string;
   /** Target entity name */
   target: string;
@@ -24,7 +24,7 @@ export interface Relationship {
   description?: string;
 }
 
-/** Result of entity/relationship extraction from a text chunk. */
+/** Result of entity/relationship extraction from a text segment. */
 export interface ExtractionResult {
   entities: Entity[];
   relationships: Relationship[];
@@ -36,14 +36,14 @@ export interface ExtractionResult {
  * You provide this — call any LLM (OpenAI, Anthropic, Bedrock, Ollama, etc.)
  * and return structured entities + relationships.
  *
- * @param text - The text chunk to extract from (typically 500-2000 tokens)
+ * @param text - The text segment to extract from (typically 500-2000 tokens)
  * @returns Extracted entities and relationships
  */
 export type ExtractorFn = (text: string) => Promise<ExtractionResult>;
 
 /** A stored entity node in the graph. */
 export interface GraphNode {
-  /** Normalized entity name (PK-safe) */
+  /** Slugified entity name (key-safe) */
   id: string;
   /** Original entity name */
   name: string;
@@ -51,8 +51,8 @@ export interface GraphNode {
   type: string;
   /** Description */
   description: string;
-  /** Documents this entity was extracted from */
-  sourceDocuments: string[];
+  /** Document IDs this entity was extracted from */
+  docIds: string[];
   /** Last update timestamp */
   updatedAt: string;
 }
@@ -68,27 +68,27 @@ export interface GraphEdge {
   /** Description */
   description: string;
   /** Document this edge was extracted from */
-  documentId: string;
+  docId: string;
   /** Human-readable document name */
-  documentName: string;
+  docName: string;
   /** Page/section number */
-  pageNumber: number;
+  page: number;
   /** Preview of the source text */
-  chunkPreview: string;
+  preview: string;
 }
 
-/** Result of a graph lookup (single entity + its edges). */
-export interface LookupResult {
+/** Result of fetching a single entity + its edges. */
+export interface EntityResult {
   node: GraphNode | null;
   edges: GraphEdge[];
 }
 
-/** Result of a multi-hop graph traversal. */
-export interface TraversalResult {
+/** Result of a multi-hop graph walk. */
+export interface WalkResult {
   /** All entity nodes visited */
   nodes: GraphNode[];
   /** All relationship edges discovered */
   edges: GraphEdge[];
-  /** Human-readable paths (e.g. ["A --[requires]--> B --[triggers]--> C"]) */
+  /** Human-readable paths (e.g. ["A -[requires]-> B -[triggers]-> C"]) */
   paths: string[];
 }

@@ -1,5 +1,5 @@
 /**
- * Normalizes an entity name for use as a DynamoDB sort key segment.
+ * Slugifies an entity name for use as a DynamoDB sort key segment.
  *
  * - Lowercases
  * - Keeps letters and numbers from ANY language (Unicode-aware via \p{L} and \p{N})
@@ -8,7 +8,7 @@
  * - Trims leading/trailing underscores
  * - Caps at 80 chars
  */
-export function normalize(name: string): string {
+export function slugify(name: string): string {
   return name
     .toLowerCase()
     .normalize('NFC')

@@ -3,8 +3,8 @@
  *
  * Uses the adjacency list pattern in a single-table design:
  *
- *   Node:  PK=GRAPH#{namespace}  SK=NODE#{normalized_entity_name}
- *   Edge:  PK=GRAPH#{namespace}  SK=EDGE#{source}#REL#{relation}#TGT#{target}#DOC#{docId}#PG#{page}
+ *   Node:  PK=KG#{namespace}  SK=N#{slug}
+ *   Edge:  PK=KG#{namespace}  SK=E#{src}#R#{rel}#T#{tgt}#D#{docId}#P#{page}
  *
  * This gives O(1) node lookup and O(n) edge scan per entity — fast enough
  * for graphs with thousands of entities (typical RAG scale).
@@ -19,8 +19,8 @@ import {
   BatchWriteCommand,
 } from '@aws-sdk/lib-dynamodb';
 
-import type { Entity, Relationship, ExtractionResult, GraphNode, GraphEdge } from './types.js';
-import { normalize } from './normalize.js';
+import type { ExtractionResult, GraphNode, GraphEdge } from './types.js';
+import { slugify } from './slugify.js';
 
 /** Options for the GraphStore. */
 export interface GraphStoreOptions {
@@ -30,63 +30,63 @@ export interface GraphStoreOptions {
   tableName: string;
   /**
    * Partition key prefix for graph data.
-   * @default 'GRAPH#'
+   * @default 'KG#'
    */
-  pkPrefix?: string;
+  keyPrefix?: string;
 }
 
-/** Result of writing graph data for one chunk. */
-export interface WriteResult {
-  nodesWritten: number;
-  edgesWritten: number;
+/** Result of writing graph data for one segment. */
+export interface WriteStats {
+  nodes: number;
+  edges: number;
 }
 
 export class GraphStore {
   private readonly docClient: DynamoDBDocumentClient;
   private readonly tableName: string;
-  private readonly pkPrefix: string;
+  private readonly keyPrefix: string;
 
   constructor(options: GraphStoreOptions) {
     this.docClient = options.docClient;
     this.tableName = options.tableName;
-    this.pkPrefix = options.pkPrefix ?? 'GRAPH#';
+    this.keyPrefix = options.keyPrefix ?? 'KG#';
   }
 
   /**
    * Writes extracted entities and relationships to DynamoDB.
-   * Idempotent — re-extracting the same chunk overwrites with same keys.
+   * Idempotent — re-extracting the same segment overwrites with the same keys.
    */
-  async writeExtractionResult(
+  async writeGraph(
     namespace: string,
     result: ExtractionResult,
-    documentId: string,
-    documentName: string,
-    pageNumber: number,
-    chunkPreview: string,
-  ): Promise<WriteResult> {
+    docId: string,
+    docName: string,
+    page: number,
+    preview: string,
+  ): Promise<WriteStats> {
     const now = new Date().toISOString();
-    let nodesWritten = 0;
-    let edgesWritten = 0;
+    let nodes = 0;
+    let edges = 0;
 
     // Write entity nodes (upsert)
     for (const entity of result.entities) {
-      const norm = normalize(entity.name);
+      const slug = slugify(entity.name);
       try {
         await this.docClient.send(new PutCommand({
           TableName: this.tableName,
           Item: {
-            PK: `${this.pkPrefix}${namespace}`,
-            SK: `NODE#${norm}`,
-            entity_type: 'graph_node',
+            PK: `${this.keyPrefix}${namespace}`,
+            SK: `N#${slug}`,
+            kind: 'node',
             namespace,
-            entity_name: entity.name,
-            entity_category: entity.type,
+            name: entity.name,
+            category: entity.type,
             description: entity.description ?? '',
-            source_documents: [documentId],
+            doc_ids: [docId],
             updated_at: now,
           },
         }));
-        nodesWritten++;
+        nodes++;
       } catch (err) {
         console.warn(`[GraphStore] Failed to write node "${entity.name}": ${err}`);
       }
@@ -94,119 +94,119 @@ export class GraphStore {
 
     // Write relationship edges
     for (const rel of result.relationships) {
-      const sourceNorm = normalize(rel.source);
-      const targetNorm = normalize(rel.target);
-      const relNorm = rel.relation.replace(/[^a-z0-9_]/g, '_').slice(0, 50);
+      const srcSlug = slugify(rel.source);
+      const tgtSlug = slugify(rel.target);
+      const relSlug = rel.relation.replace(/[^a-z0-9_]/g, '_').slice(0, 50);
 
       try {
         await this.docClient.send(new PutCommand({
           TableName: this.tableName,
           Item: {
-            PK: `${this.pkPrefix}${namespace}`,
-            SK: `EDGE#${sourceNorm}#REL#${relNorm}#TGT#${targetNorm}#DOC#${documentId}#PG#${pageNumber}`,
-            entity_type: 'graph_edge',
+            PK: `${this.keyPrefix}${namespace}`,
+            SK: `E#${srcSlug}#R#${relSlug}#T#${tgtSlug}#D#${docId}#P#${page}`,
+            kind: 'edge',
             namespace,
-            source_entity: rel.source,
-            target_entity: rel.target,
-            relation: rel.relation,
+            src: rel.source,
+            tgt: rel.target,
+            rel: rel.relation,
             description: rel.description ?? '',
-            document_id: documentId,
-            document_name: documentName,
-            page_number: pageNumber,
-            chunk_preview: chunkPreview.slice(0, 200),
+            doc_id: docId,
+            doc_name: docName,
+            page,
+            preview: preview.slice(0, 200),
             created_at: now,
           },
         }));
-        edgesWritten++;
+        edges++;
       } catch (err) {
         console.warn(`[GraphStore] Failed to write edge "${rel.source}" -> "${rel.target}": ${err}`);
       }
     }
 
-    return { nodesWritten, edgesWritten };
+    return { nodes, edges };
   }
 
   /**
-   * Looks up a single entity and all its relationships (1-hop).
+   * Fetches a single entity and all its relationships (1-hop).
    */
-  async lookupEntity(namespace: string, entityName: string): Promise<{ node: GraphNode | null; edges: GraphEdge[] }> {
-    const norm = normalize(entityName);
-    const pk = `${this.pkPrefix}${namespace}`;
+  async getEntity(namespace: string, entityName: string): Promise<{ node: GraphNode | null; edges: GraphEdge[] }> {
+    const slug = slugify(entityName);
+    const pk = `${this.keyPrefix}${namespace}`;
 
     // Get node
     const nodeResult = await this.docClient.send(new QueryCommand({
       TableName: this.tableName,
       KeyConditionExpression: 'PK = :pk AND SK = :sk',
-      ExpressionAttributeValues: { ':pk': pk, ':sk': `NODE#${norm}` },
+      ExpressionAttributeValues: { ':pk': pk, ':sk': `N#${slug}` },
     }));
     const rawNode = nodeResult.Items?.[0];
-    const node: GraphNode | null = rawNode ? this.toGraphNode(rawNode) : null;
+    const node: GraphNode | null = rawNode ? this.toNode(rawNode) : null;
 
     // Get outgoing edges (this entity as source)
     const outgoing = await this.docClient.send(new QueryCommand({
       TableName: this.tableName,
       KeyConditionExpression: 'PK = :pk AND begins_with(SK, :sk)',
-      ExpressionAttributeValues: { ':pk': pk, ':sk': `EDGE#${norm}#` },
+      ExpressionAttributeValues: { ':pk': pk, ':sk': `E#${slug}#` },
       Limit: 50,
     }));
 
     // Get incoming edges (this entity as target)
     const incoming = await this.docClient.send(new QueryCommand({
       TableName: this.tableName,
-      KeyConditionExpression: 'PK = :pk AND begins_with(SK, :skPrefix)',
+      KeyConditionExpression: 'PK = :pk AND begins_with(SK, :edgePrefix)',
       FilterExpression: 'contains(SK, :tgt)',
-      ExpressionAttributeValues: { ':pk': pk, ':skPrefix': 'EDGE#', ':tgt': `#TGT#${norm}#` },
+      ExpressionAttributeValues: { ':pk': pk, ':edgePrefix': 'E#', ':tgt': `#T#${slug}#` },
       Limit: 50,
     }));
 
     const edges = [
-      ...(outgoing.Items ?? []).map(e => this.toGraphEdge(e)),
-      ...(incoming.Items ?? []).map(e => this.toGraphEdge(e)),
+      ...(outgoing.Items ?? []).map(e => this.toEdge(e)),
+      ...(incoming.Items ?? []).map(e => this.toEdge(e)),
     ];
 
     return { node, edges };
   }
 
   /**
-   * Multi-hop BFS traversal of the graph.
+   * Multi-hop BFS walk of the graph.
    *
    * Starts from an entity and follows relationship edges up to `maxHops` deep.
    * Returns all visited nodes, edges, and human-readable paths.
    */
-  async traverse(
+  async walk(
     namespace: string,
     startEntity: string,
     maxHops = 2,
     direction: 'outgoing' | 'incoming' | 'both' = 'both',
   ): Promise<{ nodes: GraphNode[]; edges: GraphEdge[]; paths: string[] }> {
-    const pk = `${this.pkPrefix}${namespace}`;
-    const visited = new Set<string>();
-    const allNodes: GraphNode[] = [];
-    const allEdges: GraphEdge[] = [];
+    const pk = `${this.keyPrefix}${namespace}`;
+    const seen = new Set<string>();
+    const foundNodes: GraphNode[] = [];
+    const foundEdges: GraphEdge[] = [];
     const paths: string[] = [];
-    const queue: Array<{ entity: string; depth: number; path: string[] }> = [
-      { entity: startEntity, depth: 0, path: [startEntity] },
+    const frontier: Array<{ entity: string; depth: number; trail: string[] }> = [
+      { entity: startEntity, depth: 0, trail: [startEntity] },
     ];
 
-    while (queue.length > 0 && allEdges.length < 100) {
-      const { entity, depth, path } = queue.shift()!;
-      const norm = normalize(entity);
+    while (frontier.length > 0 && foundEdges.length < 100) {
+      const { entity, depth, trail } = frontier.shift()!;
+      const slug = slugify(entity);
 
-      if (visited.has(norm)) continue;
-      visited.add(norm);
+      if (seen.has(slug)) continue;
+      seen.add(slug);
 
       // Get node info
       const nodeRes = await this.docClient.send(new QueryCommand({
         TableName: this.tableName,
         KeyConditionExpression: 'PK = :pk AND SK = :sk',
-        ExpressionAttributeValues: { ':pk': pk, ':sk': `NODE#${norm}` },
+        ExpressionAttributeValues: { ':pk': pk, ':sk': `N#${slug}` },
       }));
       if (nodeRes.Items?.[0]) {
-        allNodes.push(this.toGraphNode(nodeRes.Items[0]));
+        foundNodes.push(this.toNode(nodeRes.Items[0]));
       }
 
       if (depth >= maxHops) {
-        if (path.length > 1) paths.push(path.join(' '));
+        if (trail.length > 1) paths.push(trail.join(' '));
         continue;
       }
 
@@ -215,18 +215,18 @@ export class GraphStore {
         const outRes = await this.docClient.send(new QueryCommand({
           TableName: this.tableName,
           KeyConditionExpression: 'PK = :pk AND begins_with(SK, :sk)',
-          ExpressionAttributeValues: { ':pk': pk, ':sk': `EDGE#${norm}#` },
+          ExpressionAttributeValues: { ':pk': pk, ':sk': `E#${slug}#` },
           Limit: 20,
         }));
 
-        for (const edge of outRes.Items ?? []) {
-          allEdges.push(this.toGraphEdge(edge));
-          const target = edge.target_entity as string;
-          if (!visited.has(normalize(target))) {
-            queue.push({
-              entity: target,
+        for (const raw of outRes.Items ?? []) {
+          foundEdges.push(this.toEdge(raw));
+          const next = raw.tgt as string;
+          if (!seen.has(slugify(next))) {
+            frontier.push({
+              entity: next,
               depth: depth + 1,
-              path: [...path, `--[${edge.relation}]-->`, target],
+              trail: [...trail, `-[${raw.rel}]->`, next],
             });
           }
         }
@@ -236,41 +236,41 @@ export class GraphStore {
       if (direction === 'incoming' || direction === 'both') {
         const inRes = await this.docClient.send(new QueryCommand({
           TableName: this.tableName,
-          KeyConditionExpression: 'PK = :pk AND begins_with(SK, :skP)',
+          KeyConditionExpression: 'PK = :pk AND begins_with(SK, :edgePrefix)',
           FilterExpression: 'contains(SK, :tgt)',
-          ExpressionAttributeValues: { ':pk': pk, ':skP': 'EDGE#', ':tgt': `#TGT#${norm}#` },
+          ExpressionAttributeValues: { ':pk': pk, ':edgePrefix': 'E#', ':tgt': `#T#${slug}#` },
           Limit: 20,
         }));
 
-        for (const edge of inRes.Items ?? []) {
-          allEdges.push(this.toGraphEdge(edge));
-          const source = edge.source_entity as string;
-          if (!visited.has(normalize(source))) {
-            queue.push({
-              entity: source,
+        for (const raw of inRes.Items ?? []) {
+          foundEdges.push(this.toEdge(raw));
+          const prev = raw.src as string;
+          if (!seen.has(slugify(prev))) {
+            frontier.push({
+              entity: prev,
               depth: depth + 1,
-              path: [...path, `<--[${edge.relation}]--`, source],
+              trail: [...trail, `<-[${raw.rel}]-`, prev],
             });
           }
         }
       }
 
-      if (path.length > 1) paths.push(path.join(' '));
+      if (trail.length > 1) paths.push(trail.join(' '));
     }
 
     // Deduplicate edges
     const uniqueEdges = Array.from(
-      new Map(allEdges.map(e => [`${e.source}|${e.relation}|${e.target}`, e])).values(),
+      new Map(foundEdges.map(e => [`${e.source}|${e.relation}|${e.target}`, e])).values(),
     );
 
-    return { nodes: allNodes, edges: uniqueEdges, paths };
+    return { nodes: foundNodes, edges: uniqueEdges, paths };
   }
 
   /**
    * Deletes all graph data for a specific document within a namespace.
    */
-  async deleteByDocument(namespace: string, documentId: string): Promise<number> {
-    const pk = `${this.pkPrefix}${namespace}`;
+  async deleteByDocument(namespace: string, docId: string): Promise<number> {
+    const pk = `${this.keyPrefix}${namespace}`;
     let deleted = 0;
     let lastKey: Record<string, any> | undefined;
 
@@ -278,26 +278,15 @@ export class GraphStore {
       const result = await this.docClient.send(new QueryCommand({
         TableName: this.tableName,
         KeyConditionExpression: 'PK = :pk AND begins_with(SK, :sk)',
-        FilterExpression: 'contains(document_id, :docId) OR contains(source_documents, :docId)',
-        ExpressionAttributeValues: { ':pk': pk, ':sk': 'EDGE#', ':docId': documentId },
+        FilterExpression: 'contains(doc_id, :docId) OR contains(doc_ids, :docId)',
+        ExpressionAttributeValues: { ':pk': pk, ':sk': 'E#', ':docId': docId },
         ProjectionExpression: 'PK, SK',
         ExclusiveStartKey: lastKey,
       }));
 
       const items = result.Items ?? [];
       lastKey = result.LastEvaluatedKey;
-
-      for (let i = 0; i < items.length; i += 25) {
-        const batch = items.slice(i, i + 25);
-        await this.docClient.send(new BatchWriteCommand({
-          RequestItems: {
-            [this.tableName]: batch.map(item => ({
-              DeleteRequest: { Key: { PK: item.PK, SK: item.SK } },
-            })),
-          },
-        }));
-        deleted += batch.length;
-      }
+      deleted += await this.batchDelete(items);
     } while (lastKey);
 
     return deleted;
@@ -307,7 +296,7 @@ export class GraphStore {
    * Deletes ALL graph data for a namespace (nodes + edges).
    */
   async deleteByNamespace(namespace: string): Promise<number> {
-    const pk = `${this.pkPrefix}${namespace}`;
+    const pk = `${this.keyPrefix}${namespace}`;
     let deleted = 0;
     let lastKey: Record<string, any> | undefined;
 
@@ -323,18 +312,7 @@ export class GraphStore {
 
       const items = result.Items ?? [];
       lastKey = result.LastEvaluatedKey;
-
-      for (let i = 0; i < items.length; i += 25) {
-        const batch = items.slice(i, i + 25);
-        await this.docClient.send(new BatchWriteCommand({
-          RequestItems: {
-            [this.tableName]: batch.map(item => ({
-              DeleteRequest: { Key: { PK: item.PK, SK: item.SK } },
-            })),
-          },
-        }));
-        deleted += batch.length;
-      }
+      deleted += await this.batchDelete(items);
     } while (lastKey);
 
     return deleted;
@@ -342,27 +320,43 @@ export class GraphStore {
 
   // ===== Private helpers =====
 
-  private toGraphNode(item: Record<string, any>): GraphNode {
+  private async batchDelete(items: Record<string, any>[]): Promise<number> {
+    let deleted = 0;
+    for (let i = 0; i < items.length; i += 25) {
+      const batch = items.slice(i, i + 25);
+      await this.docClient.send(new BatchWriteCommand({
+        RequestItems: {
+          [this.tableName]: batch.map(item => ({
+            DeleteRequest: { Key: { PK: item.PK, SK: item.SK } },
+          })),
+        },
+      }));
+      deleted += batch.length;
+    }
+    return deleted;
+  }
+
+  private toNode(item: Record<string, any>): GraphNode {
     return {
-      id: normalize(item.entity_name as string),
-      name: item.entity_name as string,
-      type: item.entity_category as string,
+      id: slugify(item.name as string),
+      name: item.name as string,
+      type: item.category as string,
       description: (item.description as string) ?? '',
-      sourceDocuments: (item.source_documents as string[]) ?? [],
+      docIds: (item.doc_ids as string[]) ?? [],
       updatedAt: (item.updated_at as string) ?? '',
     };
   }
 
-  private toGraphEdge(item: Record<string, any>): GraphEdge {
+  private toEdge(item: Record<string, any>): GraphEdge {
     return {
-      source: item.source_entity as string,
-      target: item.target_entity as string,
-      relation: item.relation as string,
+      source: item.src as string,
+      target: item.tgt as string,
+      relation: item.rel as string,
       description: (item.description as string) ?? '',
-      documentId: (item.document_id as string) ?? '',
-      documentName: (item.document_name as string) ?? '',
-      pageNumber: (item.page_number as number) ?? 0,
-      chunkPreview: (item.chunk_preview as string) ?? '',
+      docId: (item.doc_id as string) ?? '',
+      docName: (item.doc_name as string) ?? '',
+      page: (item.page as number) ?? 0,
+      preview: (item.preview as string) ?? '',
     };
   }
 }

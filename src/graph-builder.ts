@@ -1,10 +1,10 @@
 /**
  * GraphBuilder — orchestrates extraction and storage of knowledge graph data.
  *
- * This is the high-level ingestion API. You give it text chunks and a pluggable
+ * This is the high-level ingestion API. You give it text segments and a pluggable
  * extractor function, and it handles:
  *   1. Calling your extractor to get entities + relationships
- *   2. Validating and filtering garbage (too short, too long, no relationships)
+ *   2. Validating and filtering noise (too short, too long, dangling relationships)
  *   3. Writing to the GraphStore
  *
  * The extractor is yours to implement — call any LLM you want.
@@ -23,44 +23,44 @@ export interface GraphBuilderOptions {
    * Minimum entity name length to accept.
    * @default 2
    */
-  minEntityLength?: number;
+  minNameLength?: number;
   /**
    * Maximum entity name length to accept.
    * @default 100
    */
-  maxEntityLength?: number;
+  maxNameLength?: number;
   /**
-   * Maximum entities per chunk.
+   * Maximum entities per segment.
    * @default 15
    */
-  maxEntitiesPerChunk?: number;
+  maxEntities?: number;
   /**
-   * Maximum relationships per chunk.
+   * Maximum relationships per segment.
    * @default 20
    */
-  maxRelationshipsPerChunk?: number;
+  maxRelationships?: number;
 }
 
-/** Input for processing a single chunk. */
-export interface ChunkInput {
-  /** Text content of the chunk */
+/** Input for processing a single segment. */
+export interface SegmentInput {
+  /** Text content of the segment */
   text: string;
   /** Namespace (e.g. tenant ID, project ID) */
   namespace: string;
   /** Document identifier */
-  documentId: string;
+  docId: string;
   /** Human-readable document name */
-  documentName: string;
+  docName: string;
   /** Page/section number */
-  pageNumber: number;
+  page: number;
 }
 
-/** Result of processing a single chunk. */
-export interface ProcessResult {
+/** Result of processing a single segment. */
+export interface SegmentResult {
   /** Number of entity nodes written */
-  nodesWritten: number;
+  nodes: number;
   /** Number of relationship edges written */
-  edgesWritten: number;
+  edges: number;
   /** Number of entities the extractor found (before filtering) */
   rawEntities: number;
   /** Number of relationships the extractor found (before filtering) */
@@ -70,92 +70,93 @@ export interface ProcessResult {
 export class GraphBuilder {
   private readonly store: GraphStore;
   private readonly extractor: ExtractorFn;
-  private readonly minEntityLength: number;
-  private readonly maxEntityLength: number;
-  private readonly maxEntitiesPerChunk: number;
-  private readonly maxRelationshipsPerChunk: number;
+  private readonly minNameLength: number;
+  private readonly maxNameLength: number;
+  private readonly maxEntities: number;
+  private readonly maxRelationships: number;
 
   constructor(options: GraphBuilderOptions) {
     this.store = options.store;
     this.extractor = options.extractor;
-    this.minEntityLength = options.minEntityLength ?? 2;
-    this.maxEntityLength = options.maxEntityLength ?? 100;
-    this.maxEntitiesPerChunk = options.maxEntitiesPerChunk ?? 15;
-    this.maxRelationshipsPerChunk = options.maxRelationshipsPerChunk ?? 20;
+    this.minNameLength = options.minNameLength ?? 2;
+    this.maxNameLength = options.maxNameLength ?? 100;
+    this.maxEntities = options.maxEntities ?? 15;
+    this.maxRelationships = options.maxRelationships ?? 20;
   }
 
   /**
-   * Processes a single text chunk: extracts entities/relationships and writes to the graph.
+   * Processes a single text segment: extracts entities/relationships and writes to the graph.
    *
-   * Safe to call concurrently for different chunks — DynamoDB handles writes atomically.
-   * For sequential processing (rate-limit friendly), process chunks one at a time.
+   * Safe to call concurrently for different segments — DynamoDB handles writes atomically.
+   * For sequential processing (rate-limit friendly), process segments one at a time.
    */
-  async processChunk(input: ChunkInput): Promise<ProcessResult> {
+  async processSegment(input: SegmentInput): Promise<SegmentResult> {
     // 1. Extract
     let raw: ExtractionResult;
     try {
       raw = await this.extractor(input.text);
     } catch (err) {
-      console.warn(`[GraphBuilder] Extraction failed for doc="${input.documentName}" page=${input.pageNumber}: ${err}`);
-      return { nodesWritten: 0, edgesWritten: 0, rawEntities: 0, rawRelationships: 0 };
+      console.warn(`[GraphBuilder] Extraction failed for doc="${input.docName}" page=${input.page}: ${err}`);
+      return { nodes: 0, edges: 0, rawEntities: 0, rawRelationships: 0 };
     }
 
     // 2. Validate and filter
-    const filtered = this.filter(raw);
+    const clean = this.clean(raw);
 
-    if (filtered.entities.length === 0) {
-      return { nodesWritten: 0, edgesWritten: 0, rawEntities: raw.entities.length, rawRelationships: raw.relationships.length };
+    if (clean.entities.length === 0) {
+      return { nodes: 0, edges: 0, rawEntities: raw.entities.length, rawRelationships: raw.relationships.length };
     }
 
     // 3. Write to store
-    const writeResult = await this.store.writeExtractionResult(
+    const stats = await this.store.writeGraph(
       input.namespace,
-      filtered,
-      input.documentId,
-      input.documentName,
-      input.pageNumber,
+      clean,
+      input.docId,
+      input.docName,
+      input.page,
       input.text.slice(0, 200),
     );
 
     return {
-      ...writeResult,
+      nodes: stats.nodes,
+      edges: stats.edges,
       rawEntities: raw.entities.length,
       rawRelationships: raw.relationships.length,
     };
   }
 
   /**
-   * Processes multiple chunks sequentially.
+   * Processes multiple segments sequentially.
    * Good for rate-limited LLM APIs — processes one at a time to avoid throttling.
    *
-   * @param chunks - Array of chunk inputs
-   * @param onProgress - Optional callback after each chunk
+   * @param segments - Array of segment inputs
+   * @param onProgress - Optional callback after each segment
    */
-  async processChunks(
-    chunks: ChunkInput[],
-    onProgress?: (index: number, total: number, result: ProcessResult) => void,
-  ): Promise<{ totalNodes: number; totalEdges: number; chunksProcessed: number }> {
+  async processSegments(
+    segments: SegmentInput[],
+    onProgress?: (index: number, total: number, result: SegmentResult) => void,
+  ): Promise<{ totalNodes: number; totalEdges: number; processed: number }> {
     let totalNodes = 0;
     let totalEdges = 0;
 
-    for (let i = 0; i < chunks.length; i++) {
-      const result = await this.processChunk(chunks[i]);
-      totalNodes += result.nodesWritten;
-      totalEdges += result.edgesWritten;
-      onProgress?.(i, chunks.length, result);
+    for (let i = 0; i < segments.length; i++) {
+      const result = await this.processSegment(segments[i]);
+      totalNodes += result.nodes;
+      totalEdges += result.edges;
+      onProgress?.(i, segments.length, result);
     }
 
-    return { totalNodes, totalEdges, chunksProcessed: chunks.length };
+    return { totalNodes, totalEdges, processed: segments.length };
   }
 
   // ===== Private: validation & filtering =====
 
-  private filter(raw: ExtractionResult): ExtractionResult {
+  private clean(raw: ExtractionResult): ExtractionResult {
     // Filter entities
     const entities: Entity[] = raw.entities
       .filter(e => e.name && e.type)
-      .filter(e => e.name.length >= this.minEntityLength && e.name.length <= this.maxEntityLength)
-      .slice(0, this.maxEntitiesPerChunk)
+      .filter(e => e.name.length >= this.minNameLength && e.name.length <= this.maxNameLength)
+      .slice(0, this.maxEntities)
       .map(e => ({
         name: e.name.trim(),
         type: e.type,
@@ -163,13 +164,13 @@ export class GraphBuilder {
       }));
 
     // Build set of known entity names for relationship validation
-    const entityNames = new Set(entities.map(e => e.name.toLowerCase()));
+    const known = new Set(entities.map(e => e.name.toLowerCase()));
 
     // Filter relationships — at least one endpoint must be a known entity
     const relationships: Relationship[] = raw.relationships
       .filter(r => r.source && r.relation && r.target)
-      .filter(r => entityNames.has(r.source.toLowerCase()) || entityNames.has(r.target.toLowerCase()))
-      .slice(0, this.maxRelationshipsPerChunk)
+      .filter(r => known.has(r.source.toLowerCase()) || known.has(r.target.toLowerCase()))
+      .slice(0, this.maxRelationships)
       .map(r => ({
         source: r.source.trim(),
         relation: r.relation.trim().toLowerCase().replace(/\s+/g, '_').slice(0, 50),

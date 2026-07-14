@@ -24,11 +24,11 @@ Vector RAG hands your agent a pile of *similar-looking* text and hopes the answe
 - *"What's connected to this incident, across all the runbooks?"*
 - *"Trace every dependency between billing and the payment gateway."*
 
-These are **multi-hop** questions — the answer isn't in one chunk, it's in the *path between chunks*. A vector store can't follow that path. A knowledge graph can.
+These are **multi-hop** questions — the answer isn't in one passage, it's in the *path between passages*. A vector store can't follow that path. A knowledge graph can.
 
-> 🧠 Research consistently shows that connecting facts through a graph beats flat vector retrieval on complex, multi-hop questions — with the bonus that the traversal path is **explainable and traceable**, so your agent can show its reasoning instead of asserting it. *(See [Neo4j's multi-hop reasoning writeup](https://neo4j.com/blog/genai/knowledge-graph-llm-multi-hop-reasoning/); summarized for compliance.)*
+> 🧠 Research consistently shows that connecting facts through a graph beats flat vector retrieval on complex, multi-hop questions — with the bonus that the walk path is **explainable and traceable**, so your agent can show its reasoning instead of asserting it. *(See [Neo4j's multi-hop reasoning writeup](https://neo4j.com/blog/genai/knowledge-graph-llm-multi-hop-reasoning/); summarized for compliance.)*
 
-`dynamo-graphrag` gives your agent two tools it can call — **look up an entity** and **traverse the graph** — backed by DynamoDB. No graph database to run, no cluster to pay for when the agent is idle.
+`dynamo-graphrag` gives your agent two tools it can call — **fetch an entity** and **walk the graph** — backed by DynamoDB. No graph database to run, no cluster to pay for when the agent is idle.
 
 ## 🧐 Why DynamoDB (and not Neo4j / Neptune)?
 
@@ -49,7 +49,7 @@ DynamoDB's adjacency-list pattern gives O(1) entity lookup and O(edges) traversa
 ┌─────────────────────────────────────────────────────────┐
 │  Ingestion                                               │
 │                                                          │
-│  Chunks ─── Your Extractor (any LLM) ─── GraphBuilder   │
+│  Segments ─── Your Extractor (any LLM) ─── GraphBuilder  │
 │                   ↓                            ↓         │
 │          { entities, relationships }    GraphStore       │
 │                                          (DynamoDB)      │
@@ -58,8 +58,8 @@ DynamoDB's adjacency-list pattern gives O(1) entity lookup and O(edges) traversa
 ┌─────────────────────────────────────────────────────────┐
 │  Query  (your agent calls these as tools)                │
 │                                                          │
-│  lookupEntity("AuthService")  ──►  node + direct edges   │
-│  traverse("AuthService", 2)   ──►  multi-hop paths       │
+│  getEntity("AuthService")  ──►  node + direct edges      │
+│  walk("AuthService", 2)    ──►  multi-hop paths          │
 │                              ↓                           │
 │         { nodes, edges, paths } ─── into agent context   │
 └─────────────────────────────────────────────────────────┘
@@ -67,14 +67,14 @@ DynamoDB's adjacency-list pattern gives O(1) entity lookup and O(edges) traversa
 
 ## ✨ Features
 
-- 🤖 **Two agent-ready tools** — `lookupEntity` (1-hop) and `traverse` (multi-hop). Drop them into any tool-calling loop or MCP server.
+- 🤖 **Two agent-ready tools** — `getEntity` (1-hop) and `walk` (multi-hop). Drop them into any tool-calling loop or MCP server.
 - 🧩 **Pluggable extraction** — bring your own LLM. OpenAI, Anthropic, Mistral, Ollama, Bedrock… just return `{ entities, relationships }`.
 - 🪶 **Serverless & scale-to-zero** — DynamoDB on-demand. Zero cost at rest.
 - 🔗 **Multi-hop traversal** — BFS graph walk with configurable depth (1–3 hops) and direction control.
 - 🧾 **Explainable paths** — every traversal returns human-readable chains (`A --[uses]--> B --[expires]--> C`) your agent can cite.
 - 📦 **Single-table design** — shares your existing DynamoDB table. Configurable key prefixes.
 - 🏢 **Multi-tenant** — every namespace is isolated by partition key.
-- 🛡️ **Fail-open** — extraction errors never crash your pipeline. Bad chunks are skipped gracefully.
+- 🛡️ **Fail-open** — extraction errors never crash your pipeline. Bad segments are skipped gracefully.
 - 🔒 **Fully typed** — strict TypeScript, ESM, zero `any` in the public API.
 - 🐣 **Tiny** — no graph DB driver, no heavy dependencies. Just `@aws-sdk/lib-dynamodb`.
 
@@ -111,7 +111,7 @@ Text: """${text}"""`
 };
 ```
 
-### 2️⃣ Ingest — build the graph from document chunks
+### 2️⃣ Ingest — build the graph from document segments
 
 ```ts
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
@@ -123,24 +123,24 @@ const db = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const store = new GraphStore({ docClient: db, tableName: 'my-rag-table' });
 const builder = new GraphBuilder({ store, extractor });
 
-// Process chunks one by one (rate-limit friendly)
-await builder.processChunks(
-  myChunks.map(chunk => ({
-    text: chunk.text,
+// Process segments one by one (rate-limit friendly)
+await builder.processSegments(
+  mySegments.map(seg => ({
+    text: seg.text,
     namespace: 'project-alpha',
-    documentId: chunk.docId,
-    documentName: chunk.fileName,
-    pageNumber: chunk.page,
+    docId: seg.docId,
+    docName: seg.fileName,
+    page: seg.page,
   })),
   (i, total) => console.log(`${i + 1}/${total}`),
 );
 ```
 
-### 3️⃣ Query — look up entities and traverse
+### 3️⃣ Query — fetch entities and walk the graph
 
 ```ts
-// Find a single entity and its direct relationships
-const { node, edges } = await store.lookupEntity('project-alpha', 'AuthService');
+// Fetch a single entity and its direct relationships
+const { node, edges } = await store.getEntity('project-alpha', 'AuthService');
 // → node: { name: 'AuthService', type: 'service', ... }
 // → edges: [
 //     { source: 'AuthService', relation: 'uses', target: 'JWT', ... },
@@ -148,12 +148,12 @@ const { node, edges } = await store.lookupEntity('project-alpha', 'AuthService')
 //     { source: 'RateLimiter', relation: 'protects', target: 'AuthService', ... },
 //   ]
 
-// Multi-hop traversal — discover chains of dependencies
-const { nodes, edges, paths } = await store.traverse('project-alpha', 'AuthService', 2);
+// Multi-hop walk — discover chains of dependencies
+const { nodes, edges, paths } = await store.walk('project-alpha', 'AuthService', 2);
 // → paths: [
-//     "AuthService --[uses]--> JWT --[expires_after]--> 24h",
-//     "AuthService --[validates]--> UserSession --[stored_in]--> Redis",
-//     "RateLimiter --[protects]--> AuthService",
+//     "AuthService -[uses]-> JWT -[expires_after]-> 24h",
+//     "AuthService -[validates]-> UserSession -[stored_in]-> Redis",
+//     "RateLimiter -[protects]-> AuthService",
 //   ]
 ```
 
@@ -165,23 +165,23 @@ This is where GraphRAG earns its keep. Expose the graph as **two tools** and let
 import { tool } from 'ai';
 import { z } from 'zod';
 
-const lookupEntity = tool({
+const findEntity = tool({
   description: 'Look up one entity and its direct relationships. Use to find what a ' +
                'specific thing connects to (services, configs, modules, people).',
   parameters: z.object({ entity: z.string() }),
   execute: async ({ entity }) => {
-    const { node, edges } = await store.lookupEntity(currentTenant, entity);
+    const { node, edges } = await store.getEntity(currentTenant, entity);
     if (!node && edges.length === 0) return { found: false };
     return {
       found: true,
       entity: node,
       relationships: edges.map(e => ({ from: e.source, relation: e.relation, to: e.target,
-                                       source: `${e.documentName} p.${e.pageNumber}` })),
+                                       source: `${e.docName} p.${e.page}` })),
     };
   },
 });
 
-const traverseGraph = tool({
+const walkGraph = tool({
   description: 'Walk the knowledge graph from a starting entity, following relationships ' +
                'up to N hops. Use for "what depends on X" / "what breaks if X changes" questions.',
   parameters: z.object({
@@ -189,17 +189,17 @@ const traverseGraph = tool({
     maxHops: z.number().min(1).max(3).default(2),
   }),
   execute: async ({ startEntity, maxHops }) => {
-    const { paths } = await store.traverse(currentTenant, startEntity, maxHops);
+    const { paths } = await store.walk(currentTenant, startEntity, maxHops);
     return { paths }; // human-readable chains the model can cite
   },
 });
 ```
 
 **Why agents reason better with these tools:**
-- **Chaining is natural** — the agent calls `lookupEntity("AuthService")`, spots an edge to `JWT`, then calls `traverse("JWT", 2)` to go deeper. It builds a reasoning chain instead of guessing.
+- **Chaining is natural** — the agent calls `findEntity("AuthService")`, spots an edge to `JWT`, then calls `walkGraph("JWT", 2)` to go deeper. It builds a reasoning chain instead of guessing.
 - **Answers become traceable** — every path is a citable chain of facts with document + page provenance. No more "trust me" answers.
 - **It fills vector RAG's blind spot** — pair these graph tools with a semantic `search` tool and the agent picks the right instrument: semantics for "what does it say," graph for "how does it connect."
-- **Cheap to explore** — at DynamoDB on-demand prices, an agent can traverse freely during a reasoning loop without running up a cluster bill.
+- **Cheap to explore** — at DynamoDB on-demand prices, an agent can walk freely during a reasoning loop without running up a cluster bill.
 
 > 💡 **Pro combo:** run `dynamo-graphrag` alongside [`dynamo-bm25-hybrid`](https://www.npmjs.com/package/dynamo-bm25-hybrid) and your agent gets the full trifecta — keyword, semantic, and graph — all serverless, all scale-to-zero, all on the same DynamoDB table.
 
@@ -219,8 +219,8 @@ Single-table, adjacency-list pattern:
 
 | PK | SK | Holds |
 | :--- | :--- | :--- |
-| `GRAPH#{namespace}` | `NODE#{entity_name}` | Entity node (name, type, description) |
-| `GRAPH#{namespace}` | `EDGE#{source}#REL#{relation}#TGT#{target}#DOC#{docId}#PG#{page}` | Relationship edge with provenance |
+| `KG#{namespace}` | `N#{slug}` | Entity node (name, category, description) |
+| `KG#{namespace}` | `E#{src}#R#{rel}#T#{tgt}#D#{docId}#P#{page}` | Relationship edge with provenance |
 
 **Required table schema:**
 - Partition key: `PK` (String)
@@ -241,25 +241,25 @@ No GSI needed. All queries use `PK` + `begins_with(SK, ...)`.
 
 | Export | What it does |
 | :--- | :--- |
-| `GraphStore` | DynamoDB read/write — lookup, traverse, delete by document or namespace |
+| `GraphStore` | DynamoDB read/write — `getEntity`, `walk`, delete by document or namespace |
 | `GraphBuilder` | Orchestrates extraction → validation → storage |
-| `normalize(name)` | Entity name normalizer (lowercase, safe for SK) |
+| `slugify(name)` | Entity name slugifier (lowercase, key-safe) |
 | `ExtractorFn` | The type signature for your pluggable extractor |
 
 ## 🧠 Extraction Tips
 
 Your extractor quality determines your graph quality. Some tips:
 
-- **Use a cheap, fast model** for extraction (GPT-4o-mini, Claude Haiku, Mistral Small). You call it once per chunk — cost matters more than reasoning depth.
-- **Limit output** — cap at 8–15 entities and 10–20 relationships per chunk. More is noise.
+- **Use a cheap, fast model** for extraction (GPT-4o-mini, Claude Haiku, Mistral Small). You call it once per segment — cost matters more than reasoning depth.
+- **Limit output** — cap at 8–15 entities and 10–20 relationships per segment. More is noise.
 - **Be specific about entity types** — tell the model your domain's types (service, API, config, module…).
 - **Relationship verbs matter** — "uses", "depends_on", "triggers", "requires" are far more useful than "is_related_to".
 - **Preserve exact notation** — entity names should match how they appear in the source ("AuthService", not "authentication service").
 
 ## ⚖️ Good to Know
 
-- **Scale** — DynamoDB handles thousands of entities per namespace easily. BFS traversal does N DynamoDB queries (one per hop × edges), so keep `maxHops ≤ 3` for snappy latency.
-- **Deduplication** — the SK pattern stores each unique (source, relation, target, document, page) combination exactly once. Re-extracting the same chunk is idempotent.
+- **Scale** — DynamoDB handles thousands of entities per namespace easily. The BFS walk does N DynamoDB queries (one per hop × edges), so keep `maxHops ≤ 3` for snappy latency.
+- **Deduplication** — the SK pattern stores each unique (source, relation, target, document, page) combination exactly once. Re-extracting the same segment is idempotent.
 - **Provenance** — every edge records the document and page it came from, so your agent can cite sources.
 - **No graph database needed** — for RAG-scale graphs (hundreds to low-thousands of entities), DynamoDB's adjacency list is fast and cheap. If you outgrow it (millions of nodes), the `GraphStore` interface is small enough to swap for Neptune.
 
