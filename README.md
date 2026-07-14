@@ -2,10 +2,10 @@
 
 # 🕸️ dynamo-graphrag
 
-### Knowledge graphs for RAG — on DynamoDB. No Neo4j, no Neptune, no cluster.
+### Give your AI agent a knowledge graph it can *walk* — on DynamoDB. No Neo4j, no Neptune, no cluster.
 
 Extract entities and relationships from your documents, store them as a graph,
-and traverse multi-hop connections at query time. **Scales to zero.**
+and let your agent traverse multi-hop connections at query time. **Scales to zero.**
 
 [![npm](https://img.shields.io/npm/v/dynamo-graphrag?color=cb3837&logo=npm)](https://www.npmjs.com/package/dynamo-graphrag)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
@@ -16,20 +16,23 @@ and traverse multi-hop connections at query time. **Scales to zero.**
 
 ---
 
-## 🤔 Why GraphRAG?
+## 🤖 Why agents need a graph, not just a vector store
 
-Standard vector RAG answers "what does this paragraph say?" — it finds the most *similar* chunks.
-But it can't answer **"what's connected to this?"** — questions that require hopping across documents:
+Vector RAG hands your agent a pile of *similar-looking* text and hopes the answer is in there. That works for "what does this say?" It falls apart on the questions agents are actually asked:
 
-- *"What depends on this config value?"*
-- *"If I change ServiceA, what else breaks?"*
-- *"Show me everything related to the auth module"*
+- *"If I change `AuthService`, what breaks downstream?"*
+- *"What's connected to this incident, across all the runbooks?"*
+- *"Trace every dependency between billing and the payment gateway."*
 
-GraphRAG solves this by building a **knowledge graph** from your documents — entities connected by typed relationships — and traversing it at query time.
+These are **multi-hop** questions — the answer isn't in one chunk, it's in the *path between chunks*. A vector store can't follow that path. A knowledge graph can.
 
-## 🧐 Why DynamoDB?
+> 🧠 Research consistently shows that connecting facts through a graph beats flat vector retrieval on complex, multi-hop questions — with the bonus that the traversal path is **explainable and traceable**, so your agent can show its reasoning instead of asserting it. *(See [Neo4j's multi-hop reasoning writeup](https://neo4j.com/blog/genai/knowledge-graph-llm-multi-hop-reasoning/); summarized for compliance.)*
 
-Every existing GraphRAG library requires Neo4j, Neptune, or an in-memory graph. Those are great for massive graphs, but for RAG workloads (hundreds to low thousands of entities per tenant):
+`dynamo-graphrag` gives your agent two tools it can call — **look up an entity** and **traverse the graph** — backed by DynamoDB. No graph database to run, no cluster to pay for when the agent is idle.
+
+## 🧐 Why DynamoDB (and not Neo4j / Neptune)?
+
+Every existing GraphRAG library needs Neo4j, Neptune, or an in-memory graph. Those shine for billion-edge graphs. But a RAG knowledge graph is *small* — hundreds to low-thousands of entities per tenant — and you shouldn't pay cluster prices for it:
 
 | Approach | Minimum cost | Scales to zero? | Managed? |
 | :--- | :--- | :---: | :---: |
@@ -38,7 +41,7 @@ Every existing GraphRAG library requires Neo4j, Neptune, or an in-memory graph. 
 | Self-hosted graph DB | ~$50 / mo + ops | ❌ | ❌ |
 | **DynamoDB on-demand** | **$0 / mo at rest** | ✅ | ✅ |
 
-DynamoDB's adjacency list pattern gives you O(1) entity lookup and O(edges) traversal per hop — plenty fast for the graph sizes RAG produces. And you pay *nothing* when nobody's querying.
+DynamoDB's adjacency-list pattern gives O(1) entity lookup and O(edges) traversal per hop — plenty fast for graph sizes RAG produces. And you pay *nothing* when no agent is querying.
 
 ## 🏗️ Architecture
 
@@ -53,20 +56,22 @@ DynamoDB's adjacency list pattern gives you O(1) entity lookup and O(edges) trav
 └─────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────┐
-│  Query                                                   │
+│  Query  (your agent calls these as tools)                │
 │                                                          │
-│  "What connects to X?" ─── GraphStore.lookupEntity()     │
-│  "Trace dependencies"  ─── GraphStore.traverse()         │
+│  lookupEntity("AuthService")  ──►  node + direct edges   │
+│  traverse("AuthService", 2)   ──►  multi-hop paths       │
 │                              ↓                           │
-│         { nodes, edges, paths } ─── feed to LLM context  │
+│         { nodes, edges, paths } ─── into agent context   │
 └─────────────────────────────────────────────────────────┘
 ```
 
 ## ✨ Features
 
+- 🤖 **Two agent-ready tools** — `lookupEntity` (1-hop) and `traverse` (multi-hop). Drop them into any tool-calling loop or MCP server.
 - 🧩 **Pluggable extraction** — bring your own LLM. OpenAI, Anthropic, Mistral, Ollama, Bedrock… just return `{ entities, relationships }`.
 - 🪶 **Serverless & scale-to-zero** — DynamoDB on-demand. Zero cost at rest.
-- 🔗 **Multi-hop traversal** — BFS graph walk with configurable depth (1–3 hops), direction control.
+- 🔗 **Multi-hop traversal** — BFS graph walk with configurable depth (1–3 hops) and direction control.
+- 🧾 **Explainable paths** — every traversal returns human-readable chains (`A --[uses]--> B --[expires]--> C`) your agent can cite.
 - 📦 **Single-table design** — shares your existing DynamoDB table. Configurable key prefixes.
 - 🏢 **Multi-tenant** — every namespace is isolated by partition key.
 - 🛡️ **Fail-open** — extraction errors never crash your pipeline. Bad chunks are skipped gracefully.
@@ -88,7 +93,7 @@ The extractor is any async function that takes text and returns entities + relat
 ```ts
 import type { ExtractorFn } from 'dynamo-graphrag';
 
-// Example using OpenAI (you can use any provider)
+// Example using OpenAI (any provider works)
 const extractor: ExtractorFn = async (text) => {
   const response = await openai.chat.completions.create({
     model: 'gpt-4o-mini',
@@ -152,21 +157,65 @@ const { nodes, edges, paths } = await store.traverse('project-alpha', 'AuthServi
 //   ]
 ```
 
-### 4️⃣ Feed into your RAG prompt
+## 🛠️ Wire it as agent tools
+
+This is where GraphRAG earns its keep. Expose the graph as **two tools** and let the agent reason its way across your knowledge — first pinpointing an entity, then walking outward. Shown with the Vercel AI SDK; the same shape works for LangChain, OpenAI function calling, or an MCP server.
 
 ```ts
-const context = paths.join('\n');
-const prompt = `Use this knowledge graph context to answer the question.
+import { tool } from 'ai';
+import { z } from 'zod';
 
-Graph relationships:
-${context}
+const lookupEntity = tool({
+  description: 'Look up one entity and its direct relationships. Use to find what a ' +
+               'specific thing connects to (services, configs, modules, people).',
+  parameters: z.object({ entity: z.string() }),
+  execute: async ({ entity }) => {
+    const { node, edges } = await store.lookupEntity(currentTenant, entity);
+    if (!node && edges.length === 0) return { found: false };
+    return {
+      found: true,
+      entity: node,
+      relationships: edges.map(e => ({ from: e.source, relation: e.relation, to: e.target,
+                                       source: `${e.documentName} p.${e.pageNumber}` })),
+    };
+  },
+});
 
-Question: ${userQuestion}`;
+const traverseGraph = tool({
+  description: 'Walk the knowledge graph from a starting entity, following relationships ' +
+               'up to N hops. Use for "what depends on X" / "what breaks if X changes" questions.',
+  parameters: z.object({
+    startEntity: z.string(),
+    maxHops: z.number().min(1).max(3).default(2),
+  }),
+  execute: async ({ startEntity, maxHops }) => {
+    const { paths } = await store.traverse(currentTenant, startEntity, maxHops);
+    return { paths }; // human-readable chains the model can cite
+  },
+});
 ```
+
+**Why agents reason better with these tools:**
+- **Chaining is natural** — the agent calls `lookupEntity("AuthService")`, spots an edge to `JWT`, then calls `traverse("JWT", 2)` to go deeper. It builds a reasoning chain instead of guessing.
+- **Answers become traceable** — every path is a citable chain of facts with document + page provenance. No more "trust me" answers.
+- **It fills vector RAG's blind spot** — pair these graph tools with a semantic `search` tool and the agent picks the right instrument: semantics for "what does it say," graph for "how does it connect."
+- **Cheap to explore** — at DynamoDB on-demand prices, an agent can traverse freely during a reasoning loop without running up a cluster bill.
+
+> 💡 **Pro combo:** run `dynamo-graphrag` alongside [`dynamo-bm25-hybrid`](https://www.npmjs.com/package/dynamo-bm25-hybrid) and your agent gets the full trifecta — keyword, semantic, and graph — all serverless, all scale-to-zero, all on the same DynamoDB table.
+
+## 🎯 When to reach for this
+
+| You're building… | Why a graph helps |
+| :--- | :--- |
+| A **dev/ops copilot** over runbooks & architecture docs | "What breaks if I change X" is a traversal, not a similarity search |
+| A **compliance / policy agent** | Trace which rules depend on which clauses across documents |
+| A **research assistant** | Connect findings scattered across many papers |
+| An **incident-response agent** | Walk from a symptom to related systems, owners, and past incidents |
+| Any **agent that gets "how are these related?" questions** | That's literally what a graph answers |
 
 ## 🗄️ DynamoDB Table Design
 
-Single-table, adjacency list pattern:
+Single-table, adjacency-list pattern:
 
 | PK | SK | Holds |
 | :--- | :--- | :--- |
@@ -201,17 +250,17 @@ No GSI needed. All queries use `PK` + `begins_with(SK, ...)`.
 
 Your extractor quality determines your graph quality. Some tips:
 
-- **Use a cheap, fast model** for extraction (GPT-4o-mini, Claude Haiku, Mistral Small). You'll call it once per chunk — cost matters more than reasoning depth.
-- **Limit output** — cap at 8-15 entities and 10-20 relationships per chunk. More is noise.
+- **Use a cheap, fast model** for extraction (GPT-4o-mini, Claude Haiku, Mistral Small). You call it once per chunk — cost matters more than reasoning depth.
+- **Limit output** — cap at 8–15 entities and 10–20 relationships per chunk. More is noise.
 - **Be specific about entity types** — tell the model your domain's types (service, API, config, module…).
-- **Relationship verbs matter** — "uses", "depends_on", "triggers", "requires" are more useful than "is_related_to".
+- **Relationship verbs matter** — "uses", "depends_on", "triggers", "requires" are far more useful than "is_related_to".
 - **Preserve exact notation** — entity names should match how they appear in the source ("AuthService", not "authentication service").
 
 ## ⚖️ Good to Know
 
-- **Scale** — DynamoDB handles thousands of entities per namespace easily. The BFS traversal does N DynamoDB queries (one per hop × edges), so keep `maxHops ≤ 3` for snappy latency.
-- **Deduplication** — the SK pattern ensures each unique (source, relation, target, document, page) combination is stored exactly once. Re-extracting the same chunk is idempotent.
-- **Provenance** — every edge stores which document and page it came from. Your LLM can cite sources.
+- **Scale** — DynamoDB handles thousands of entities per namespace easily. BFS traversal does N DynamoDB queries (one per hop × edges), so keep `maxHops ≤ 3` for snappy latency.
+- **Deduplication** — the SK pattern stores each unique (source, relation, target, document, page) combination exactly once. Re-extracting the same chunk is idempotent.
+- **Provenance** — every edge records the document and page it came from, so your agent can cite sources.
 - **No graph database needed** — for RAG-scale graphs (hundreds to low-thousands of entities), DynamoDB's adjacency list is fast and cheap. If you outgrow it (millions of nodes), the `GraphStore` interface is small enough to swap for Neptune.
 
 ## 🤝 Contributing
@@ -223,5 +272,5 @@ Issues and PRs welcome. Keep it typed, keep it serverless, keep it simple.
 [MIT](./LICENSE)
 
 <div align="center">
-<sub>The first TypeScript GraphRAG library that doesn't need a graph database.</sub>
+<sub>The first TypeScript GraphRAG library that doesn't need a graph database — built so your agent can <em>reason across</em> knowledge, not just retrieve it.</sub>
 </div>
