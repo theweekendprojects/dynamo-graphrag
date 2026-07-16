@@ -1,5 +1,5 @@
 {
-  "name": "dynamo-graphrag",
+  "name": "@theweekendprojects/dynamo-graphrag",
   "version": "0.1.0",
   "description": "Serverless GraphRAG on DynamoDB — knowledge graph extraction, storage, and multi-hop traversal with zero infrastructure cost at rest.",
   "license": "MIT",
