@@ -1,6 +1,6 @@
 {
   "name": "dynamo-graphrag",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Serverless GraphRAG on DynamoDB — knowledge graph extraction, storage, and multi-hop traversal with zero infrastructure cost at rest.",
   "license": "MIT",
   "type": "module",
